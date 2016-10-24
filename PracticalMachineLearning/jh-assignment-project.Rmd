@@ -1,0 +1,134 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Marius Fersigan"
+date: "October 23, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Description
+
+In this project, our goal is to predict the manner of exercise performing using data from accelerometers on the belt, forearm, arm, and dumbells. 
+
+Researchers obtained the training data set by monitoring 6 participants who were asked to execute barbell lifts in 5 different ways (correctly and incorrectly).
+
+We will use the training data to build a prediction model which will be then used to predict the outcome of quality execution for 20 out of sample cases.
+
+## Data preparation
+
+In this step, we will load, explore and prepare the data for training step.
+
+```{r dataprep, warning=FALSE, echo=TRUE, message=FALSE}
+library(readr)
+train_data <- read_csv("pml-training.csv")
+test_data <- read_csv("pml-testing.csv")
+
+```
+
+We will explore now the `NA` values for every column/feature. `apply` function is useful here for calculating the `NA` values proportion. 
+
+```{r}
+train_na_ratio <- apply(X = train_data, MARGIN = 2, FUN = function (col) {sum(is.na(col))/length(col)})
+
+train_na_ratio
+```
+
+We can see that there are some features with a very high proportion of `NA` values. This features will be filtered out:
+
+```{r}
+good_features <- names(train_na_ratio)[train_na_ratio < 0.97]
+train_data <- train_data[,good_features]
+test_data <- test_data[,good_features[(good_features != "classe")]]
+```
+
+Also we can observe that the first 7 columns are not reliable features (like timestamp, names, window). I used `readr` package for loading the `csv` files so the `train_data` and `test_data` are not real `data.frame` classes (and `xgboost/caret` will complain) - so in this step I also converted the mention objects to `data.frame` class.
+
+```{r}
+train_data <- as.data.frame(train_data[,-(1:7)])
+test_data <- as.data.frame(test_data[,-(1:7)])
+```
+
+It is obvious that the remaining features should be numeric. Also I use to isolate the features from the labels (it brings more clarity for me) - so I will perform the convertio to numeric and extraction of labels in the chunk bellow. 
+
+For some reason the warning `NA coercion` showed up: so I did another check in order to see if there are some numerical features where the numeric conversion didn't worked. After building our `train_na` object it shows only one case/row for a few features. So there is not reason to keep those around: I will use `complete.case` function in order to obtain a data set without any `NA` values.
+
+```{r}
+labels <- as.factor(train_data$classe)
+train_data$classe <- NULL
+
+train_data <- as.data.frame(apply(X = train_data, MARGIN = c(1,2), as.numeric))
+test_data <- as.data.frame(apply(X = test_data, MARGIN = c(1,2), as.numeric))
+
+train_na <- apply(X = train_data, MARGIN = 2, FUN = function (col) {sum(is.na(col))})
+
+train_na
+
+complete_cases <- complete.cases(train_data)
+
+train_data <- train_data[complete_cases,]
+labels <- labels[complete_cases]
+
+```
+
+We want to reduce the useless workload so we will try first some kind of decision tree model (eXtreme Gradient Boosting): in this way we are not required to scale or normalize the values of numeric features.
+
+For now we are left with `r (dim(test_data)[2])` numerical variables.
+
+We also need to know about the balance between labels. If there is big differences between the number of classes we could have problems with the model.
+
+```{r}
+barplot(table(labels))
+```
+
+There are more cases for class A but the differences are not high. We can go further with classification.
+
+
+## Splitting the training set
+
+For now the training set will be splitted in 75% - 25% (training/testing).
+
+```{r}
+library(caret)
+library(xgboost)
+
+train_indexes <- createDataPartition(labels, list = FALSE, p = 0.75)
+
+training <- train_data[train_indexes,]
+testing <- train_data[-train_indexes,]
+
+y_training <- labels[train_indexes]
+y_testing <- labels[-train_indexes]
+```
+
+## Training the model
+
+Bellow is the code for model training and also predictions after the model is trained. I used cross validation with 10 folds in `trainControl` as input for the `train`method (which is somewhat `default` in many machine learning books and tutorials). I didn't make multiple iterations - I just stick with the default for the first iteration (if the results will not be satisfing I can run the optimizations later - no need to spend time in useless computation until I know for sure it is needed).
+
+```{r}
+
+train_control<- trainControl(method="cv", number=10)
+
+xgb_model <- train(x = training, y = y_training, method = 'xgbTree', trControl = train_control)
+
+tr_preds <- predict(object = xgb_model, training)
+preds <- predict(object = xgb_model, testing)
+
+
+tr_cm <- confusionMatrix(data = tr_preds, reference = y_training)
+cm <- confusionMatrix(data = preds, reference = y_testing)
+
+
+# prediction for quiz - no need to be included here
+#preds_20 <- predict(object = xgb_model, test_data)
+
+tr_cm
+
+cm
+
+```
+
+Training accuracy for this model is `r tr_cm$overall['Accuracy']` while testing accuracy is `r cm$overall['Accuracy']` (with an out of sample error equal with `r 1 - cm$overall['Accuracy']`). We observe a relative low difference between the performance on training set versus testing set - obviously we expect to see a similar prediction accuracy for unseen cases. Our model generalize well.
+
